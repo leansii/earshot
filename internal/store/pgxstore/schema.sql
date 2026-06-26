@@ -12,7 +12,10 @@ CREATE TABLE projects (
     labels        TEXT[] NOT NULL DEFAULT '{}',
     llm_model     TEXT NOT NULL DEFAULT 'fake:classifier-v1',
     embed_model   TEXT NOT NULL DEFAULT 'fake:hash-256',
-    auto_file     BOOLEAN NOT NULL DEFAULT FALSE,
+    tracker            TEXT    NOT NULL DEFAULT 'github',
+    feedback_autofile  BOOLEAN NOT NULL DEFAULT TRUE,
+    task_strategy      TEXT    NOT NULL DEFAULT 'sub_issues',
+    connector_config   JSONB   NOT NULL DEFAULT '{}'::jsonb,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -59,4 +62,18 @@ CREATE TABLE items (
 CREATE TABLE feedback_items (
     feedback_id TEXT PRIMARY KEY REFERENCES feedback(id) ON DELETE CASCADE,
     item_id     TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE
+);
+
+CREATE TABLE tasks (
+    id             TEXT PRIMARY KEY,
+    project_id     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    item_id        TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    title          TEXT NOT NULL DEFAULT '',
+    description    TEXT NOT NULL DEFAULT '',
+    status         TEXT NOT NULL DEFAULT 'needs_triage',
+    tracker_ref    TEXT NOT NULL DEFAULT '',
+    tracker_number INTEGER NOT NULL DEFAULT 0,
+    tracker_url    TEXT NOT NULL DEFAULT '',
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );

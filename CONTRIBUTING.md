@@ -34,16 +34,16 @@ CI runs `make check`; please ensure it is green before opening a PR.
 cmd/earshot/          single binary: serve | worker | migrate | seed-project | approve | …
 internal/
   core/               shared domain types (no internal deps)
-  ingest/             HTTP front door: auth, rate limit, validation, triage routes
+  ingest/             HTTP front door: auth, rate limit, validation, triage/task routes
   queue/              Queue interface + River driver (riverq/)
   store/              Store interface + Postgres driver (pgxstore/)
   memory/             in-memory Store+Queue for dev/tests
-  llm/                Classifier interface + anthropic + fake
+  llm/                Provider (classifier + triage-agent) + anthropic + fake
   embed/              Embedder interface + fake
   dedup/              cosine near-duplicate detection
   scrub/              secret/PII redaction
-  triage/             enrich→dedup→scrub→triage pipeline + human-gated approve
-  ghissue/            GitHub issue adapter + mock
+  triage/             enrich→dedup→scrub→auto-file pipeline + human-gated task approve
+  connector/          pluggable issue tracker (GitHub) + mock
   config/  app/       env config + dependency wiring
 migrations/           goose SQL migrations
 ```

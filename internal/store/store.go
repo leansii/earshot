@@ -50,8 +50,20 @@ type Store interface {
 	Item(ctx context.Context, id string) (core.Item, error)
 	ListItems(ctx context.Context, projectID string, status core.Status) ([]core.Item, error)
 	UpdateItemStatus(ctx context.Context, id string, status core.Status) error
-	// MarkItemFiled records the GitHub issue created for an approved item.
+	// MarkItemFiled records the tracker issue created for a feedback-issue.
 	MarkItemFiled(ctx context.Context, id string, issueNumber int, issueURL string) error
+
+	// --- Tasks (derived by the triage-agent; human-gated) ---
+
+	CreateTask(ctx context.Context, task core.Task) (core.Task, error)
+	Task(ctx context.Context, id string) (core.Task, error)
+	// TasksForItem returns all tasks attached to a feedback-issue, oldest first.
+	TasksForItem(ctx context.Context, itemID string) ([]core.Task, error)
+	// ListTasks returns a project's tasks filtered by status ("" = all).
+	ListTasks(ctx context.Context, projectID string, status core.Status) ([]core.Task, error)
+	UpdateTaskStatus(ctx context.Context, id string, status core.Status) error
+	// MarkTaskPushed records the tracker reference for an approved, pushed task.
+	MarkTaskPushed(ctx context.Context, id, ref string, number int, url string) error
 
 	// --- Admin / seeding (used by the CLI and tests) ---
 

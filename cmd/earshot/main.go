@@ -58,6 +58,8 @@ func main() {
 		err = cmdSeedProject(ctx, log, os.Args[2:])
 	case "triage-list":
 		err = cmdTriageList(ctx, log, os.Args[2:])
+	case "tasks":
+		err = cmdTasks(ctx, log, os.Args[2:])
 	case "approve":
 		err = cmdApprove(ctx, log, os.Args[2:])
 	case "reject":
@@ -86,9 +88,10 @@ Usage:
   earshot worker         Run a job worker (River backend)
   earshot migrate        Apply database migrations (app schema + River)
   earshot seed-project   Create a project and print a new app API key
-  earshot triage-list    List triage items for a project
-  earshot approve        Approve an item and file its GitHub issue
-  earshot reject         Reject an item
+  earshot triage-list    List feedback-issues for a project
+  earshot tasks          List agent-generated tasks for a project
+  earshot approve        Approve a task and push it to the tracker
+  earshot reject         Reject a task
   earshot version        Print version
 
 Configuration is read from the environment (see .env.example).
@@ -206,9 +209,15 @@ func cmdSeedProject(ctx context.Context, log *slog.Logger, args []string) error 
 	tokenFile := fs.String("token-file", "", "path to the project's fine-grained PAT")
 	labels := fs.String("labels", "feedback", "comma-separated issue labels")
 	rpm := fs.Int("rate-limit", 60, "per-key rate limit (requests/min)")
+	tracker := fs.String("tracker", "github", "issue tracker: github|none")
+	strategy := fs.String("task-strategy", "sub_issues", "how tasks attach: sub_issues|checklist|comments")
+	autofile := fs.Bool("feedback-autofile", true, "auto-create the feedback-issue after scrubbing")
 	_ = fs.Parse(args)
 	if *slug == "" {
 		return errors.New("seed-project: --slug is required")
+	}
+	if ts := core.TaskStrategy(*strategy); !ts.Valid() {
+		return fmt.Errorf("seed-project: invalid --task-strategy %q", *strategy)
 	}
 
 	a, err := loadApp(ctx, log)
@@ -229,6 +238,8 @@ func cmdSeedProject(ctx context.Context, log *slog.Logger, args []string) error 
 	proj, err := a.Store.CreateProject(ctx, core.Project{
 		Slug: *slug, Name: *name, GitHubOwner: *owner, GitHubRepo: *repo,
 		GitHubToken: token, Labels: splitCSV(*labels),
+		Tracker: core.TrackerProvider(*tracker), TaskStrategy: core.TaskStrategy(*strategy),
+		FeedbackAutoFile: *autofile,
 	})
 	if err != nil {
 		return err
@@ -272,14 +283,49 @@ func cmdTriageList(ctx context.Context, log *slog.Logger, args []string) error {
 		return nil
 	}
 	for _, it := range items {
-		fmt.Printf("%s  [%s]  %s  (%s, %d report(s))\n", it.ID, it.Status, it.Title, it.Category, it.FeedbackCount)
+		issue := ""
+		if it.GitHubIssueNumber > 0 {
+			issue = fmt.Sprintf(" issue#%d", it.GitHubIssueNumber)
+		}
+		fmt.Printf("%s  [%s]%s  %s  (%s, %d report(s))\n", it.ID, it.Status, issue, it.Title, it.Category, it.FeedbackCount)
+	}
+	return nil
+}
+
+func cmdTasks(ctx context.Context, log *slog.Logger, args []string) error {
+	fs := flag.NewFlagSet("tasks", flag.ExitOnError)
+	projectID := fs.String("project", "", "project ID (required)")
+	status := fs.String("status", string(core.StatusNeedsTriage), "status filter (empty for all)")
+	_ = fs.Parse(args)
+	if *projectID == "" {
+		return errors.New("tasks: --project is required")
+	}
+	a, err := loadApp(ctx, log)
+	if err != nil {
+		return err
+	}
+	defer a.Close()
+	tasks, err := a.Store.ListTasks(ctx, *projectID, core.Status(*status))
+	if err != nil {
+		return err
+	}
+	if len(tasks) == 0 {
+		fmt.Println("(no tasks)")
+		return nil
+	}
+	for _, t := range tasks {
+		ref := ""
+		if t.TrackerRef != "" {
+			ref = "  -> " + t.TrackerRef
+		}
+		fmt.Printf("%s  [%s]  %s  (item %s)%s\n", t.ID, t.Status, t.Title, t.ItemID, ref)
 	}
 	return nil
 }
 
 func cmdApprove(ctx context.Context, log *slog.Logger, args []string) error {
 	fs := flag.NewFlagSet("approve", flag.ExitOnError)
-	id := fs.String("id", "", "item ID (required)")
+	id := fs.String("id", "", "task ID (required)")
 	_ = fs.Parse(args)
 	if *id == "" {
 		return errors.New("approve: --id is required")
@@ -289,17 +335,21 @@ func cmdApprove(ctx context.Context, log *slog.Logger, args []string) error {
 		return err
 	}
 	defer a.Close()
-	filed, err := a.Approver.Approve(ctx, *id)
+	pushed, err := a.Approver.Approve(ctx, *id)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Filed issue #%d: %s\n", filed.GitHubIssueNumber, filed.GitHubIssueURL)
+	if pushed.TrackerURL != "" {
+		fmt.Printf("Task %s approved and pushed (%s): %s\n", pushed.ID, pushed.TrackerRef, pushed.TrackerURL)
+	} else {
+		fmt.Printf("Task %s approved (tracker=none, not pushed)\n", pushed.ID)
+	}
 	return nil
 }
 
 func cmdReject(ctx context.Context, log *slog.Logger, args []string) error {
 	fs := flag.NewFlagSet("reject", flag.ExitOnError)
-	id := fs.String("id", "", "item ID (required)")
+	id := fs.String("id", "", "task ID (required)")
 	_ = fs.Parse(args)
 	if *id == "" {
 		return errors.New("reject: --id is required")

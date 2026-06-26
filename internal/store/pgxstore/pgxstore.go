@@ -99,18 +99,24 @@ func (s *Store) AppKeyByHash(ctx context.Context, keyHash string) (core.AppKey, 
 // Project implements store.Store.
 func (s *Store) Project(ctx context.Context, id string) (core.Project, error) {
 	const q = `SELECT id, slug, name, github_owner, github_repo, github_token, labels,
-	                  llm_model, embed_model, auto_file, created_at
+	                  llm_model, embed_model, tracker, feedback_autofile, task_strategy,
+	                  connector_config, created_at
 	           FROM projects WHERE id = $1`
 	var p core.Project
+	var tracker, strategy string
+	var connCfg []byte
 	err := s.pool.QueryRow(ctx, q, id).Scan(
 		&p.ID, &p.Slug, &p.Name, &p.GitHubOwner, &p.GitHubRepo, &p.GitHubToken, &p.Labels,
-		&p.LLMModel, &p.EmbedModel, &p.AutoFile, &p.CreatedAt)
+		&p.LLMModel, &p.EmbedModel, &tracker, &p.FeedbackAutoFile, &strategy, &connCfg, &p.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return core.Project{}, store.ErrNotFound
 	}
 	if err != nil {
 		return core.Project{}, err
 	}
+	p.Tracker = core.TrackerProvider(tracker)
+	p.TaskStrategy = core.TaskStrategy(strategy)
+	_ = json.Unmarshal(connCfg, &p.ConnectorConfig)
 	return p, nil
 }
 
@@ -275,24 +281,125 @@ func (s *Store) MarkItemFiled(ctx context.Context, id string, issueNumber int, i
 	return nil
 }
 
+// --- Tasks ---
+
+const taskCols = `id, project_id, item_id, title, description, status, tracker_ref, tracker_number, tracker_url, created_at, updated_at`
+
+func scanTasks(rows pgx.Rows) ([]core.Task, error) {
+	var out []core.Task
+	for rows.Next() {
+		var t core.Task
+		if err := rows.Scan(&t.ID, &t.ProjectID, &t.ItemID, &t.Title, &t.Description, &t.Status,
+			&t.TrackerRef, &t.TrackerNumber, &t.TrackerURL, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// CreateTask implements store.Store.
+func (s *Store) CreateTask(ctx context.Context, task core.Task) (core.Task, error) {
+	if task.Status == "" {
+		task.Status = core.StatusNeedsTriage
+	}
+	const q = `INSERT INTO tasks (id, project_id, item_id, title, description, status)
+	           VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5)
+	           RETURNING id, created_at, updated_at`
+	err := s.pool.QueryRow(ctx, q, task.ProjectID, task.ItemID, task.Title, task.Description, string(task.Status)).
+		Scan(&task.ID, &task.CreatedAt, &task.UpdatedAt)
+	if err != nil {
+		return core.Task{}, fmt.Errorf("pgxstore: insert task: %w", err)
+	}
+	return task, nil
+}
+
+// Task implements store.Store.
+func (s *Store) Task(ctx context.Context, id string) (core.Task, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+taskCols+` FROM tasks WHERE id = $1`, id)
+	if err != nil {
+		return core.Task{}, err
+	}
+	defer rows.Close()
+	tasks, err := scanTasks(rows)
+	if err != nil {
+		return core.Task{}, err
+	}
+	if len(tasks) == 0 {
+		return core.Task{}, store.ErrNotFound
+	}
+	return tasks[0], nil
+}
+
+// TasksForItem implements store.Store.
+func (s *Store) TasksForItem(ctx context.Context, itemID string) ([]core.Task, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+taskCols+` FROM tasks WHERE item_id = $1 ORDER BY id`, itemID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanTasks(rows)
+}
+
+// ListTasks implements store.Store.
+func (s *Store) ListTasks(ctx context.Context, projectID string, status core.Status) ([]core.Task, error) {
+	q := `SELECT ` + taskCols + ` FROM tasks WHERE project_id = $1`
+	args := []any{projectID}
+	if status != "" {
+		q += ` AND status = $2`
+		args = append(args, string(status))
+	}
+	q += ` ORDER BY id`
+	rows, err := s.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanTasks(rows)
+}
+
+// UpdateTaskStatus implements store.Store.
+func (s *Store) UpdateTaskStatus(ctx context.Context, id string, status core.Status) error {
+	ct, err := s.pool.Exec(ctx, `UPDATE tasks SET status = $2, updated_at = now() WHERE id = $1`, id, string(status))
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+// MarkTaskPushed implements store.Store.
+func (s *Store) MarkTaskPushed(ctx context.Context, id, ref string, number int, url string) error {
+	ct, err := s.pool.Exec(ctx,
+		`UPDATE tasks SET status = $2, tracker_ref = $3, tracker_number = $4, tracker_url = $5, updated_at = now() WHERE id = $1`,
+		id, string(core.StatusFiled), ref, number, url)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
 // --- Admin ---
 
 // CreateProject implements store.Store.
 func (s *Store) CreateProject(ctx context.Context, p core.Project) (core.Project, error) {
-	if p.ID == "" {
-		p.ID = ""
+	p.ApplyDefaults()
+	connCfg, err := json.Marshal(orEmptyMap(p.ConnectorConfig))
+	if err != nil {
+		return core.Project{}, err
 	}
-	const q = `INSERT INTO projects (id, slug, name, github_owner, github_repo, github_token, labels, llm_model, embed_model, auto_file)
-	           VALUES (COALESCE(NULLIF($1,''), gen_random_uuid()::text), $2, $3, $4, $5, $6, $7, $8, $9, $10)
+	const q = `INSERT INTO projects (id, slug, name, github_owner, github_repo, github_token, labels,
+	                                 llm_model, embed_model, tracker, feedback_autofile, task_strategy, connector_config)
+	           VALUES (COALESCE(NULLIF($1,''), gen_random_uuid()::text), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 	           RETURNING id, created_at`
-	if p.LLMModel == "" {
-		p.LLMModel = "fake:classifier-v1"
-	}
-	if p.EmbedModel == "" {
-		p.EmbedModel = "fake:hash-256"
-	}
-	err := s.pool.QueryRow(ctx, q,
-		p.ID, p.Slug, p.Name, p.GitHubOwner, p.GitHubRepo, p.GitHubToken, p.Labels, p.LLMModel, p.EmbedModel, p.AutoFile).
+	err = s.pool.QueryRow(ctx, q,
+		p.ID, p.Slug, p.Name, p.GitHubOwner, p.GitHubRepo, p.GitHubToken, p.Labels, p.LLMModel, p.EmbedModel,
+		string(p.Tracker), p.FeedbackAutoFile, string(p.TaskStrategy), connCfg).
 		Scan(&p.ID, &p.CreatedAt)
 	if err != nil {
 		return core.Project{}, fmt.Errorf("pgxstore: insert project: %w", err)

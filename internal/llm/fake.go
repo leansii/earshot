@@ -59,6 +59,37 @@ func (f *Fake) Enrich(_ context.Context, in EnrichInput) (EnrichResult, error) {
 	return EnrichResult{Category: category, Title: title, Summary: summary}, nil
 }
 
+// DecomposeTasks implements Planner deterministically: tasks are derived from
+// the category and title, never from instructions embedded in the body.
+func (f *Fake) DecomposeTasks(_ context.Context, in PlanInput) ([]Task, error) {
+	title := strings.TrimSpace(in.Title)
+	if title == "" {
+		title = "feedback"
+	}
+	switch in.Category {
+	case "bug":
+		return []Task{
+			{Title: "Reproduce: " + title, Description: "Confirm the reported behavior from the feedback."},
+			{Title: "Fix: " + title, Description: "Address the root cause."},
+			{Title: "Add a regression test", Description: "Cover the scenario so it cannot recur."},
+		}, nil
+	case "feature_request":
+		return []Task{
+			{Title: "Design: " + title, Description: "Sketch the approach and scope."},
+			{Title: "Implement: " + title, Description: "Build the requested capability."},
+		}, nil
+	case "performance":
+		return []Task{
+			{Title: "Profile: " + title, Description: "Measure where time is spent."},
+			{Title: "Optimize: " + title, Description: "Reduce the hot path identified by profiling."},
+		}, nil
+	default:
+		return []Task{
+			{Title: "Review feedback: " + title, Description: "Decide whether action is needed."},
+		}, nil
+	}
+}
+
 func containsAny(s string, subs ...string) bool {
 	for _, sub := range subs {
 		if strings.Contains(s, sub) {

@@ -9,7 +9,8 @@ WHERE key_hash = $1 AND revoked_at IS NULL;
 
 -- name: GetProject :one
 SELECT id, slug, name, github_owner, github_repo, github_token, labels,
-       llm_model, embed_model, auto_file, created_at
+       llm_model, embed_model, tracker, feedback_autofile, task_strategy,
+       connector_config, created_at
 FROM projects
 WHERE id = $1;
 
@@ -60,4 +61,28 @@ UPDATE items SET status = $2, updated_at = now() WHERE id = $1;
 
 -- name: MarkItemFiled :execrows
 UPDATE items SET status = 'filed', github_issue_number = $2, github_issue_url = $3, updated_at = now()
+WHERE id = $1;
+
+-- name: CreateTask :one
+INSERT INTO tasks (id, project_id, item_id, title, description, status)
+VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5)
+RETURNING id, created_at, updated_at;
+
+-- name: GetTask :one
+SELECT id, project_id, item_id, title, description, status, tracker_ref, tracker_number, tracker_url, created_at, updated_at
+FROM tasks WHERE id = $1;
+
+-- name: TasksForItem :many
+SELECT id, project_id, item_id, title, description, status, tracker_ref, tracker_number, tracker_url, created_at, updated_at
+FROM tasks WHERE item_id = $1 ORDER BY id;
+
+-- name: ListTasks :many
+SELECT id, project_id, item_id, title, description, status, tracker_ref, tracker_number, tracker_url, created_at, updated_at
+FROM tasks WHERE project_id = $1 AND status = $2 ORDER BY id;
+
+-- name: UpdateTaskStatus :execrows
+UPDATE tasks SET status = $2, updated_at = now() WHERE id = $1;
+
+-- name: MarkTaskPushed :execrows
+UPDATE tasks SET status = 'filed', tracker_ref = $2, tracker_number = $3, tracker_url = $4, updated_at = now()
 WHERE id = $1;

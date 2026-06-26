@@ -10,8 +10,8 @@ import (
 	"log/slog"
 
 	"github.com/leansii/earshot/internal/config"
+	"github.com/leansii/earshot/internal/connector"
 	"github.com/leansii/earshot/internal/embed"
-	"github.com/leansii/earshot/internal/ghissue"
 	"github.com/leansii/earshot/internal/llm"
 	"github.com/leansii/earshot/internal/memory"
 	"github.com/leansii/earshot/internal/queue"
@@ -27,7 +27,7 @@ type App struct {
 	Store    store.Store
 	Queue    queue.Queue
 	Pipeline *triage.Pipeline
-	Approver *triage.Approver
+	Approver *triage.TaskApprover
 	Log      *slog.Logger
 
 	memBackend *memory.Backend
@@ -40,7 +40,7 @@ func Build(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, erro
 		log = slog.Default()
 	}
 
-	classifier, err := llm.New(cfg.LLMModel, cfg.KeyFunc())
+	provider, err := llm.New(cfg.LLMModel, cfg.KeyFunc())
 	if err != nil {
 		return nil, err
 	}
@@ -48,7 +48,7 @@ func Build(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, erro
 	if err != nil {
 		return nil, err
 	}
-	issuer := ghissue.NewClient()
+	tracker := connector.NewGitHub()
 
 	a := &App{Cfg: cfg, Log: log}
 
@@ -75,8 +75,8 @@ func Build(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, erro
 		return nil, fmt.Errorf("app: unknown queue backend %q", cfg.Queue)
 	}
 
-	a.Pipeline = triage.NewPipeline(a.Store, classifier, embedder, 0, log)
-	a.Approver = triage.NewApprover(a.Store, issuer, log)
+	a.Pipeline = triage.NewPipeline(a.Store, provider, embedder, tracker, 0, log)
+	a.Approver = triage.NewTaskApprover(a.Store, tracker, log)
 	return a, nil
 }
 

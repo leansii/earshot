@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/leansii/earshot/internal/connector"
 	"github.com/leansii/earshot/internal/core"
 	"github.com/leansii/earshot/internal/embed"
-	"github.com/leansii/earshot/internal/ghissue"
 	"github.com/leansii/earshot/internal/llm"
 	"github.com/leansii/earshot/internal/memory"
 	"github.com/leansii/earshot/internal/queue"
@@ -20,28 +20,35 @@ type harness struct {
 	b        *memory.Backend
 	project  core.Project
 	pipeline *triage.Pipeline
-	approver *triage.Approver
-	gh       *ghissue.Mock
+	approver *triage.TaskApprover
+	tracker  *connector.Mock
 }
 
-func newHarness(t *testing.T) *harness {
+// newHarness builds a harness; mutate lets a test tweak the project before it is
+// created (strategy, tracker, autofile, ...).
+func newHarness(t *testing.T, mutate func(*core.Project)) *harness {
 	t.Helper()
 	ctx := context.Background()
 	b := memory.New()
-	project, err := b.CreateProject(ctx, core.Project{
+	p := core.Project{
 		Slug: "demo", GitHubOwner: "leansii", GitHubRepo: "earshot",
 		GitHubToken: "ghp_projecttoken", Labels: []string{"feedback", "from-earshot"},
-	})
+		Tracker: core.TrackerGitHub, TaskStrategy: core.StrategySubIssues, FeedbackAutoFile: true,
+	}
+	if mutate != nil {
+		mutate(&p)
+	}
+	project, err := b.CreateProject(ctx, p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	gh := ghissue.NewMock()
+	tr := connector.NewMock()
 	return &harness{
 		b:        b,
 		project:  project,
-		pipeline: triage.NewPipeline(b, llm.NewFake(""), embed.NewFake("hash-64"), 0, nil),
-		approver: triage.NewApprover(b, gh, nil),
-		gh:       gh,
+		pipeline: triage.NewPipeline(b, llm.NewFake(""), embed.NewFake("hash-64"), tr, 0, nil),
+		approver: triage.NewTaskApprover(b, tr, nil),
+		tracker:  tr,
 	}
 }
 
@@ -69,131 +76,220 @@ func (h *harness) run(t *testing.T, feedbackID string) {
 	}
 }
 
-func (h *harness) drafts(t *testing.T) []core.Item {
+func (h *harness) items(t *testing.T) []core.Item {
 	t.Helper()
-	items, err := h.b.ListItems(context.Background(), h.project.ID, core.StatusNeedsTriage)
+	items, err := h.b.ListItems(context.Background(), h.project.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	return items
 }
 
-// TestPipeline_CreatesDraftAndNeverAutoFiles is the central guarantee: the
-// pipeline produces a needs_triage draft and NOTHING reaches GitHub.
-func TestPipeline_CreatesDraftAndNeverAutoFiles(t *testing.T) {
-	h := newHarness(t)
+func (h *harness) tasks(t *testing.T, itemID string) []core.Task {
+	t.Helper()
+	tasks, err := h.b.TasksForItem(context.Background(), itemID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tasks
+}
+
+// TestPipeline_AutoFilesIssueAndDraftsTasks is the central guarantee of the new
+// model: the feedback-issue auto-files, the agent drafts tasks, and NO task is
+// pushed to the tracker by the pipeline.
+func TestPipeline_AutoFilesIssueAndDraftsTasks(t *testing.T) {
+	h := newHarness(t, nil)
 	fb := h.addFeedback(t, "the save button crashes when I click it")
 	h.run(t, fb.ID)
 
-	drafts := h.drafts(t)
-	if len(drafts) != 1 {
-		t.Fatalf("expected 1 draft, got %d", len(drafts))
+	items := h.items(t)
+	if len(items) != 1 {
+		t.Fatalf("expected 1 feedback-issue, got %d", len(items))
 	}
-	d := drafts[0]
-	if d.Status != core.StatusNeedsTriage {
-		t.Fatalf("status = %q, want needs_triage", d.Status)
+	if items[0].Status != core.StatusFiled || items[0].GitHubIssueNumber == 0 {
+		t.Fatalf("feedback-issue should be auto-filed, got %+v", items[0])
 	}
-	if d.Category != "bug" {
-		t.Fatalf("category = %q, want bug", d.Category)
+	if h.tracker.FeedbackIssueCount() != 1 {
+		t.Fatalf("expected 1 filed feedback-issue, got %d", h.tracker.FeedbackIssueCount())
 	}
-	if d.FeedbackCount != 1 {
-		t.Fatalf("feedback_count = %d, want 1", d.FeedbackCount)
+
+	tasks := h.tasks(t, items[0].ID)
+	if len(tasks) != 3 { // bug → reproduce/fix/test
+		t.Fatalf("expected 3 draft tasks for a bug, got %d", len(tasks))
 	}
-	if h.gh.CallCount() != 0 {
-		t.Fatalf("GitHub was called %d times during enrichment — must be 0", h.gh.CallCount())
+	for _, tk := range tasks {
+		if tk.Status != core.StatusNeedsTriage {
+			t.Fatalf("task %s should be needs_triage, got %s", tk.ID, tk.Status)
+		}
+	}
+	if h.tracker.TaskPushCount() != 0 {
+		t.Fatalf("pipeline must NOT push tasks; got %d pushes", h.tracker.TaskPushCount())
+	}
+}
+
+func TestPipeline_NoAutoFileWhenDisabled(t *testing.T) {
+	h := newHarness(t, func(p *core.Project) { p.FeedbackAutoFile = false })
+	fb := h.addFeedback(t, "the save button crashes")
+	h.run(t, fb.ID)
+
+	items := h.items(t)
+	if items[0].Status != core.StatusNeedsTriage || items[0].GitHubIssueNumber != 0 {
+		t.Fatalf("issue must NOT be filed when autofile off: %+v", items[0])
+	}
+	if h.tracker.FeedbackIssueCount() != 0 {
+		t.Fatal("tracker should not be called when autofile is off")
+	}
+	if len(h.tasks(t, items[0].ID)) == 0 {
+		t.Fatal("tasks should still be drafted")
+	}
+}
+
+func TestPipeline_TrackerNoneKeepsEverythingInDB(t *testing.T) {
+	h := newHarness(t, func(p *core.Project) { p.Tracker = core.TrackerNone })
+	fb := h.addFeedback(t, "please add dark mode")
+	h.run(t, fb.ID)
+
+	if h.tracker.FeedbackIssueCount() != 0 {
+		t.Fatal("tracker=none must not file anything")
+	}
+	if len(h.tasks(t, h.items(t)[0].ID)) == 0 {
+		t.Fatal("tasks should still be drafted in DB")
 	}
 }
 
 func TestPipeline_LinksNearDuplicates(t *testing.T) {
-	h := newHarness(t)
+	h := newHarness(t, nil)
 	a := h.addFeedback(t, "the save button crashes when I click it")
 	h.run(t, a.ID)
-	b := h.addFeedback(t, "the save button crashes when I click it") // identical
+	b := h.addFeedback(t, "the save button crashes when I click it")
 	h.run(t, b.ID)
 
-	drafts := h.drafts(t)
-	if len(drafts) != 1 {
-		t.Fatalf("near-duplicate should link, not create; got %d drafts", len(drafts))
+	items := h.items(t)
+	if len(items) != 1 {
+		t.Fatalf("near-duplicate should link; got %d issues", len(items))
 	}
-	if drafts[0].FeedbackCount != 2 {
-		t.Fatalf("feedback_count = %d, want 2", drafts[0].FeedbackCount)
+	if items[0].FeedbackCount != 2 {
+		t.Fatalf("feedback_count = %d, want 2", items[0].FeedbackCount)
 	}
-}
-
-func TestPipeline_ScrubsSecretsBeforeTriage(t *testing.T) {
-	h := newHarness(t)
-	fb := h.addFeedback(t, "email me at hacker@evil.com about this")
-	h.run(t, fb.ID)
-
-	d := h.drafts(t)[0]
-	if strings.Contains(d.ScrubbedBody, "hacker@evil.com") {
-		t.Fatalf("email leaked into draft body: %q", d.ScrubbedBody)
-	}
-	if !strings.Contains(d.ScrubbedBody, "[REDACTED:email]") {
-		t.Fatalf("expected redaction placeholder, got %q", d.ScrubbedBody)
-	}
-	if strings.Contains(d.Title, "hacker@evil.com") {
-		t.Fatalf("email leaked into title: %q", d.Title)
+	if h.tracker.FeedbackIssueCount() != 1 {
+		t.Fatalf("only the first should file an issue; got %d", h.tracker.FeedbackIssueCount())
 	}
 }
 
-// TestApprove_FilesScrubbedIssueViaPerProjectToken is the human-gate guarantee:
-// only an explicit approval files an issue, it uses the project's own token,
-// and the issue contains scrubbed content.
-func TestApprove_FilesScrubbedIssueViaPerProjectToken(t *testing.T) {
-	h := newHarness(t)
-	fb := h.addFeedback(t, "the export throws an error; my token was ghp_abcdefghijklmnopqrstuvwxyz0123456789AB")
+func TestPipeline_ScrubsBeforeFiling(t *testing.T) {
+	h := newHarness(t, nil)
+	fb := h.addFeedback(t, "the export throws an error; token ghp_abcdefghijklmnopqrstuvwxyz0123456789AB")
 	h.run(t, fb.ID)
-	item := h.drafts(t)[0]
 
-	if h.gh.CallCount() != 0 {
-		t.Fatal("no issue should exist before approval")
+	if h.tracker.FeedbackIssueCount() != 1 {
+		t.Fatal("expected the issue to be filed")
+	}
+	body := h.tracker.Issues[0].Body
+	if strings.Contains(body, "ghp_abcdefghijklmnopqrstuvwxyz0123456789AB") {
+		t.Fatalf("secret leaked into filed issue: %q", body)
+	}
+	if !strings.Contains(body, "[REDACTED:github-pat]") {
+		t.Fatalf("expected redaction in filed issue body, got %q", body)
+	}
+}
+
+// TestApproveTask_SubIssuePushesViaProjectToken is the human-gate guarantee at
+// the task level: only an explicit approval pushes a task, as a sub-issue, using
+// the project's own token.
+func TestApproveTask_SubIssuePushesViaProjectToken(t *testing.T) {
+	h := newHarness(t, nil)
+	fb := h.addFeedback(t, "the save button crashes")
+	h.run(t, fb.ID)
+	task := h.tasks(t, h.items(t)[0].ID)[0]
+
+	if h.tracker.TaskPushCount() != 0 {
+		t.Fatal("no task should be pushed before approval")
 	}
 
-	filed, err := h.approver.Approve(context.Background(), item.ID)
+	pushed, err := h.approver.Approve(context.Background(), task.ID)
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
-
-	if h.gh.CallCount() != 1 {
-		t.Fatalf("expected exactly 1 GitHub call, got %d", h.gh.CallCount())
+	if len(h.tracker.SubIssues) != 1 {
+		t.Fatalf("expected 1 sub-issue, got %d", len(h.tracker.SubIssues))
 	}
-	req := h.gh.Calls[0]
-	if req.Owner != "leansii" || req.Repo != "earshot" {
-		t.Fatalf("issue targeted wrong repo: %+v", req)
+	if pushed.Status != core.StatusFiled || !strings.HasPrefix(pushed.TrackerRef, "#") {
+		t.Fatalf("task not marked pushed: %+v", pushed)
 	}
-	if h.gh.Tokens[0] != "ghp_projecttoken" {
-		t.Fatalf("expected per-project token, got %q", h.gh.Tokens[0])
+	// Tokens recorded: one for the feedback-issue, one for the sub-issue, both
+	// the project's token.
+	for _, tok := range h.tracker.Tokens {
+		if tok != "ghp_projecttoken" {
+			t.Fatalf("expected per-project token, got %q", tok)
+		}
 	}
-	if strings.Contains(req.Body, "ghp_abcdefghijklmnopqrstuvwxyz0123456789AB") {
-		t.Fatalf("secret leaked into issue body: %q", req.Body)
-	}
-	if !strings.Contains(strings.Join(req.Labels, ","), "from-earshot") {
-		t.Fatalf("project labels not applied: %v", req.Labels)
-	}
-	if filed.Status != core.StatusFiled || filed.GitHubIssueNumber != 1 {
-		t.Fatalf("item not marked filed: %+v", filed)
-	}
-
-	// Re-approving must refuse.
-	if _, err := h.approver.Approve(context.Background(), item.ID); err == nil {
-		t.Fatal("re-approving a filed item should error")
+	if _, err := h.approver.Approve(context.Background(), task.ID); err == nil {
+		t.Fatal("re-approving a pushed task should error")
 	}
 }
 
-func TestReject_NeverCallsGitHub(t *testing.T) {
-	h := newHarness(t)
-	fb := h.addFeedback(t, "the page is slow to load")
+func TestApproveTask_ChecklistStrategy(t *testing.T) {
+	h := newHarness(t, func(p *core.Project) { p.TaskStrategy = core.StrategyChecklist })
+	fb := h.addFeedback(t, "the save button crashes")
 	h.run(t, fb.ID)
-	item := h.drafts(t)[0]
+	task := h.tasks(t, h.items(t)[0].ID)[0]
 
-	if err := h.approver.Reject(context.Background(), item.ID); err != nil {
+	if _, err := h.approver.Approve(context.Background(), task.ID); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if len(h.tracker.BodyUpdates) != 1 {
+		t.Fatalf("checklist should update the issue body once, got %d", len(h.tracker.BodyUpdates))
+	}
+	if !strings.Contains(h.tracker.BodyUpdates[0], "- [x]") {
+		t.Fatalf("checklist body should contain a checked item: %q", h.tracker.BodyUpdates[0])
+	}
+}
+
+func TestApproveTask_CommentsStrategy(t *testing.T) {
+	h := newHarness(t, func(p *core.Project) { p.TaskStrategy = core.StrategyComments })
+	fb := h.addFeedback(t, "the save button crashes")
+	h.run(t, fb.ID)
+	task := h.tasks(t, h.items(t)[0].ID)[0]
+
+	if _, err := h.approver.Approve(context.Background(), task.ID); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if len(h.tracker.Comments) != 1 {
+		t.Fatalf("comments strategy should post 1 comment, got %d", len(h.tracker.Comments))
+	}
+}
+
+func TestApproveTask_TrackerNoneApprovesWithoutPush(t *testing.T) {
+	h := newHarness(t, func(p *core.Project) { p.Tracker = core.TrackerNone })
+	fb := h.addFeedback(t, "the save button crashes")
+	h.run(t, fb.ID)
+	task := h.tasks(t, h.items(t)[0].ID)[0]
+
+	pushed, err := h.approver.Approve(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if pushed.Status != core.StatusApproved {
+		t.Fatalf("tracker=none task should be approved (not filed), got %s", pushed.Status)
+	}
+	if h.tracker.TaskPushCount() != 0 {
+		t.Fatal("tracker=none must not push")
+	}
+}
+
+func TestRejectTask_NeverPushes(t *testing.T) {
+	h := newHarness(t, nil)
+	fb := h.addFeedback(t, "the page is slow")
+	h.run(t, fb.ID)
+	task := h.tasks(t, h.items(t)[0].ID)[0]
+
+	if err := h.approver.Reject(context.Background(), task.ID); err != nil {
 		t.Fatalf("reject: %v", err)
 	}
-	if h.gh.CallCount() != 0 {
-		t.Fatal("reject must not call GitHub")
+	if h.tracker.TaskPushCount() != 0 {
+		t.Fatal("reject must not push to tracker")
 	}
-	got, _ := h.b.Item(context.Background(), item.ID)
+	got, _ := h.b.Task(context.Background(), task.ID)
 	if got.Status != core.StatusRejected {
 		t.Fatalf("status = %q, want rejected", got.Status)
 	}

@@ -43,14 +43,16 @@ in the README "Security posture" section):
 1. **Ingest is fast & dumb** — authenticate, validate, and enqueue in one DB
    transaction; no LLM/GitHub calls on the request path.
 2. **Async work behind an interface** — retryable, idempotent jobs.
-3. **Human triage gate** — the pipeline never auto-files; only an explicit human
-   approval can create a GitHub issue. `auto_file` is OFF and unused in v1.
-4. **Feedback is an injection vector** — bodies are data, never instructions;
-   the model gets no tools and no secrets.
+3. **Human gate at the task level** — the triage-agent never pushes tasks; only
+   an explicit human approval pushes a task to the tracker. The feedback-issue
+   may auto-file (`feedback_autofile`, default on) but only after scrubbing.
+4. **Feedback is an injection vector** — bodies are data, never instructions, for
+   both the classifier and the triage-agent; the model gets no tools and no
+   secrets, and the agent sees only scrubbed content.
 5. **Least privilege** — per-project fine-grained PAT scoped to one repo with
    *Issues: read & write*; never a shared org-wide token.
-6. **PII / privacy** — explicit scrub stage redacts secrets/PII before content
-   can reach a (possibly public) issue.
+6. **PII / privacy** — scrub is a hard barrier: nothing is filed or pushed with
+   un-scrubbed content.
 7. **Per-app auth + rate limiting** — hashed API keys, per-key limits, strict
    one-key-to-one-project tenant isolation.
 

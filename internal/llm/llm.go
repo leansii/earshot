@@ -44,8 +44,9 @@ type Classifier interface {
 // from files/vaults at call time rather than held on a struct.
 type KeyFunc func(provider string) (string, error)
 
-// New constructs a Classifier from a "provider:model" address.
-func New(address string, keys KeyFunc) (Classifier, error) {
+// New constructs a Provider (classifier + task planner) from a "provider:model"
+// address.
+func New(address string, keys KeyFunc) (Provider, error) {
 	provider, model, ok := strings.Cut(address, ":")
 	if !ok {
 		return nil, fmt.Errorf("llm: address %q must be provider:model", address)

@@ -34,9 +34,44 @@ func (s Status) Valid() bool {
 	}
 }
 
-// Project is a single tenant: one GitHub repository that receives triaged
-// issues, plus the per-project secrets and model configuration. Tenant
-// isolation is enforced by always scoping queries to a ProjectID.
+// TrackerProvider selects the external issue tracker a project pushes to.
+type TrackerProvider string
+
+const (
+	TrackerGitHub TrackerProvider = "github"
+	// TrackerNone keeps everything in Earshot's DB and pushes nowhere. The DB
+	// is always the source of truth; the tracker is a projection.
+	TrackerNone TrackerProvider = "none"
+)
+
+// TaskStrategy controls how approved tasks are attached to their parent
+// feedback-issue in the tracker.
+type TaskStrategy string
+
+const (
+	// StrategySubIssues files each task as a native child issue (GitHub
+	// sub-issues) linked to the feedback-issue.
+	StrategySubIssues TaskStrategy = "sub_issues"
+	// StrategyChecklist renders tasks as a markdown task-list in the
+	// feedback-issue body.
+	StrategyChecklist TaskStrategy = "checklist"
+	// StrategyComments posts each task as a comment on the feedback-issue.
+	StrategyComments TaskStrategy = "comments"
+)
+
+// Valid reports whether s is a known task strategy.
+func (s TaskStrategy) Valid() bool {
+	switch s {
+	case StrategySubIssues, StrategyChecklist, StrategyComments:
+		return true
+	default:
+		return false
+	}
+}
+
+// Project is a single tenant: one tracker repository that receives feedback-
+// issues, plus the per-project secrets, model, and connector configuration.
+// Tenant isolation is enforced by always scoping queries to a ProjectID.
 type Project struct {
 	ID          string
 	Slug        string
@@ -51,11 +86,40 @@ type Project struct {
 	// LLMModel and EmbedModel are addressed as provider:model.
 	LLMModel   string
 	EmbedModel string
-	// AutoFile is OFF by default and intentionally unused by the v1 pipeline.
-	// It exists only so the schema is ready for a future, explicitly opted-in
-	// auto-file mode guarded by a confidence threshold. See SECURITY.md.
-	AutoFile  bool
+
+	// --- Connector configuration (see the README "configuration" table) ---
+
+	// Tracker is which external system feedback-issues are pushed to.
+	Tracker TrackerProvider
+	// FeedbackAutoFile, when true, auto-creates the feedback-issue in the
+	// tracker after scrubbing (no human gate at the issue level). The human
+	// gate lives at the task level instead.
+	FeedbackAutoFile bool
+	// TaskStrategy is how approved tasks attach to the feedback-issue.
+	TaskStrategy TaskStrategy
+	// ConnectorConfig holds provider-specific settings (e.g. Jira project key)
+	// so new connectors need no schema change.
+	ConnectorConfig map[string]any
+
 	CreatedAt time.Time
+}
+
+// ApplyDefaults fills unset connector/model fields with sane defaults. It does
+// not touch FeedbackAutoFile (a bool whose intended default is true but which
+// the caller sets explicitly, so an intentional false is preserved).
+func (p *Project) ApplyDefaults() {
+	if p.Tracker == "" {
+		p.Tracker = TrackerGitHub
+	}
+	if p.TaskStrategy == "" {
+		p.TaskStrategy = StrategySubIssues
+	}
+	if p.LLMModel == "" {
+		p.LLMModel = "fake:classifier-v1"
+	}
+	if p.EmbedModel == "" {
+		p.EmbedModel = "fake:hash-256"
+	}
 }
 
 // AppKey is a per-app API credential. A key maps to exactly one project; a key
@@ -90,8 +154,10 @@ type Feedback struct {
 	CreatedAt time.Time
 }
 
-// Item is a deduplicated cluster of feedback and the unit a human triages. The
-// pipeline writes it as a draft in NeedsTriage; approval files it to GitHub.
+// Item is a deduplicated cluster of feedback — the "feedback-issue". With
+// FeedbackAutoFile on, the pipeline scrubs it and files it to the tracker
+// automatically (Status becomes Filed). The triage-agent then decomposes it
+// into Tasks, which are the human-gated unit.
 type Item struct {
 	ID        string
 	ProjectID string
@@ -99,17 +165,39 @@ type Item struct {
 	Title     string
 	Summary   string
 	// ScrubbedBody is the representative feedback body after PII/secret
-	// redaction — this is what would appear in a (possibly public) issue.
+	// redaction — this is what appears in a (possibly public) issue. The
+	// pipeline refuses to file a feedback-issue if scrubbing has not run.
 	ScrubbedBody string
 	Status       Status
 	// Embedding is the dedup vector for the representative feedback.
 	Embedding     []float32
 	FeedbackCount int
-	// GitHub linkage, populated only after an approved item is filed.
+	// Tracker linkage, populated when the feedback-issue is filed.
 	GitHubIssueNumber int
 	GitHubIssueURL    string
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
+}
+
+// Task is an actionable work item that the triage-agent derives from a
+// feedback-issue (Item). Tasks always live in Earshot's DB first (the source of
+// truth). A task starts in NeedsTriage; a human Approves it; only then is it
+// pushed to the tracker (Status Filed) and linked to its parent feedback-issue
+// per the project's TaskStrategy. Rejecting never touches the tracker.
+type Task struct {
+	ID        string
+	ProjectID string
+	// ItemID is the parent feedback-issue.
+	ItemID      string
+	Title       string
+	Description string
+	Status      Status
+	// Tracker linkage, populated once an approved task is pushed.
+	TrackerRef    string // human-readable, e.g. "#42" or a comment URL
+	TrackerNumber int
+	TrackerURL    string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 // Tx is an opaque unit-of-work handle. It lets the ingest path write feedback

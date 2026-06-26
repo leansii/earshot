@@ -37,14 +37,14 @@ const (
 type Service struct {
 	store    store.Store
 	queue    queue.Queue
-	approver *triage.Approver
+	approver *triage.TaskApprover
 	log      *slog.Logger
 	lim      *limiter
 }
 
 // NewService builds an ingest Service. approver may be nil to disable the
 // human-triage HTTP endpoints (e.g. an ingest-only deployment).
-func NewService(st store.Store, q queue.Queue, approver *triage.Approver, log *slog.Logger) *Service {
+func NewService(st store.Store, q queue.Queue, approver *triage.TaskApprover, log *slog.Logger) *Service {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -58,11 +58,14 @@ func (s *Service) Routes() http.Handler {
 	r.Group(func(r chi.Router) {
 		r.Use(s.authMiddleware)
 		r.Post("/v1/feedback", s.handleFeedback)
-		// Human triage gate. Approving here is the ONLY HTTP path that can
-		// reach GitHub, and only via an explicit operator call.
+		// Feedback-issues (auto-filed) and their agent-generated tasks.
 		r.Get("/v1/triage", s.handleListTriage)
-		r.Post("/v1/triage/{id}/approve", s.handleApprove)
-		r.Post("/v1/triage/{id}/reject", s.handleReject)
+		r.Get("/v1/triage/{id}/tasks", s.handleListItemTasks)
+		// Human task gate. Approving a task is the ONLY HTTP path that pushes a
+		// task to the tracker, and only via an explicit operator call.
+		r.Get("/v1/tasks", s.handleListTasks)
+		r.Post("/v1/tasks/{id}/approve", s.handleApproveTask)
+		r.Post("/v1/tasks/{id}/reject", s.handleRejectTask)
 	})
 	return r
 }

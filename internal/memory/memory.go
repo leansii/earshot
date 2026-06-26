@@ -26,6 +26,7 @@ type Backend struct {
 	keys     map[string]core.AppKey // by hash
 	feedback map[string]core.Feedback
 	items    map[string]core.Item
+	tasks    map[string]core.Task
 	fbToItem map[string]string // feedbackID -> itemID
 
 	jobs chan queue.Job // committed jobs awaiting consumption
@@ -41,6 +42,7 @@ func New() *Backend {
 		keys:     map[string]core.AppKey{},
 		feedback: map[string]core.Feedback{},
 		items:    map[string]core.Item{},
+		tasks:    map[string]core.Task{},
 		fbToItem: map[string]string{},
 		jobs:     make(chan queue.Job, 1024),
 		now:      time.Now,
@@ -304,6 +306,93 @@ func (b *Backend) MarkItemFiled(_ context.Context, id string, issueNumber int, i
 	return nil
 }
 
+// --- store.Store: tasks ---
+
+// CreateTask implements store.Store.
+func (b *Backend) CreateTask(_ context.Context, task core.Task) (core.Task, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	task.ID = b.nextID("task")
+	now := b.now()
+	task.CreatedAt = now
+	task.UpdatedAt = now
+	if task.Status == "" {
+		task.Status = core.StatusNeedsTriage
+	}
+	b.tasks[task.ID] = task
+	return task, nil
+}
+
+// Task implements store.Store.
+func (b *Backend) Task(_ context.Context, id string) (core.Task, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	t, ok := b.tasks[id]
+	if !ok {
+		return core.Task{}, store.ErrNotFound
+	}
+	return t, nil
+}
+
+// TasksForItem implements store.Store.
+func (b *Backend) TasksForItem(_ context.Context, itemID string) ([]core.Task, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []core.Task
+	for _, t := range b.tasks {
+		if t.ItemID == itemID {
+			out = append(out, t)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
+// ListTasks implements store.Store.
+func (b *Backend) ListTasks(_ context.Context, projectID string, status core.Status) ([]core.Task, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []core.Task
+	for _, t := range b.tasks {
+		if t.ProjectID == projectID && (status == "" || t.Status == status) {
+			out = append(out, t)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
+// UpdateTaskStatus implements store.Store.
+func (b *Backend) UpdateTaskStatus(_ context.Context, id string, status core.Status) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	t, ok := b.tasks[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	t.Status = status
+	t.UpdatedAt = b.now()
+	b.tasks[id] = t
+	return nil
+}
+
+// MarkTaskPushed implements store.Store.
+func (b *Backend) MarkTaskPushed(_ context.Context, id, ref string, number int, url string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	t, ok := b.tasks[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	t.Status = core.StatusFiled
+	t.TrackerRef = ref
+	t.TrackerNumber = number
+	t.TrackerURL = url
+	t.UpdatedAt = b.now()
+	b.tasks[id] = t
+	return nil
+}
+
 // --- store.Store: admin ---
 
 // CreateProject implements store.Store.
@@ -313,6 +402,7 @@ func (b *Backend) CreateProject(_ context.Context, p core.Project) (core.Project
 	if p.ID == "" {
 		p.ID = b.nextID("proj")
 	}
+	p.ApplyDefaults()
 	p.CreatedAt = b.now()
 	b.projects[p.ID] = p
 	return p, nil
