@@ -1,0 +1,37 @@
+# ---- Secrets: never commit these ----
+.env
+.env.*
+*.env
+!.env.example
+*.local
+secrets/
+*.pem
+*.key
+*.pat
+*-token
+*_token
+*.token
+config.local.*
+github-token*
+*credentials*
+
+# ---- Build artifacts ----
+/bin/
+/dist/
+/build/
+# The compiled binary at repo root (NOT the cmd/earshot/ source dir).
+/earshot
+*.exe
+*.test
+*.out
+coverage.*
+*.prof
+
+# ---- Go ----
+vendor/
+
+# ---- Editors / OS ----
+.idea/
+.vscode/
+.DS_Store
+*.swp

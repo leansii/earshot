@@ -1,0 +1,103 @@
+// SPDX-License-Identifier: Apache-2.0
+
+// Package app wires Earshot's components together from configuration, choosing
+// the in-memory backend for dev/tests or Postgres+River for production.
+package app
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+
+	"github.com/leansii/earshot/internal/config"
+	"github.com/leansii/earshot/internal/embed"
+	"github.com/leansii/earshot/internal/ghissue"
+	"github.com/leansii/earshot/internal/llm"
+	"github.com/leansii/earshot/internal/memory"
+	"github.com/leansii/earshot/internal/queue"
+	"github.com/leansii/earshot/internal/queue/riverq"
+	"github.com/leansii/earshot/internal/store"
+	"github.com/leansii/earshot/internal/store/pgxstore"
+	"github.com/leansii/earshot/internal/triage"
+)
+
+// App holds the wired components.
+type App struct {
+	Cfg      config.Config
+	Store    store.Store
+	Queue    queue.Queue
+	Pipeline *triage.Pipeline
+	Approver *triage.Approver
+	Log      *slog.Logger
+
+	memBackend *memory.Backend
+	pgStore    *pgxstore.Store
+}
+
+// Build constructs an App from configuration.
+func Build(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error) {
+	if log == nil {
+		log = slog.Default()
+	}
+
+	classifier, err := llm.New(cfg.LLMModel, cfg.KeyFunc())
+	if err != nil {
+		return nil, err
+	}
+	embedder, err := embed.New(cfg.EmbedModel)
+	if err != nil {
+		return nil, err
+	}
+	issuer := ghissue.NewClient()
+
+	a := &App{Cfg: cfg, Log: log}
+
+	switch cfg.Queue {
+	case "memory":
+		b := memory.New()
+		a.memBackend = b
+		a.Store = b
+		a.Queue = b
+	case "river":
+		pg, err := pgxstore.New(ctx, cfg.DatabaseURL)
+		if err != nil {
+			return nil, err
+		}
+		q, err := riverq.NewQueue(pg.Pool())
+		if err != nil {
+			pg.Close()
+			return nil, err
+		}
+		a.pgStore = pg
+		a.Store = pg
+		a.Queue = q
+	default:
+		return nil, fmt.Errorf("app: unknown queue backend %q", cfg.Queue)
+	}
+
+	a.Pipeline = triage.NewPipeline(a.Store, classifier, embedder, 0, log)
+	a.Approver = triage.NewApprover(a.Store, issuer, log)
+	return a, nil
+}
+
+// InMemory reports whether the app is using the single-process memory backend.
+func (a *App) InMemory() bool { return a.memBackend != nil }
+
+// RunWorker consumes jobs until ctx is cancelled, dispatching to the pipeline.
+func (a *App) RunWorker(ctx context.Context) error {
+	if a.memBackend != nil {
+		return a.memBackend.Run(ctx, a.Pipeline.Handle)
+	}
+	consumer, err := riverq.NewConsumer(a.pgStore.Pool(), a.Pipeline.Handle, 10)
+	if err != nil {
+		return err
+	}
+	return consumer.Run(ctx)
+}
+
+// Close releases resources.
+func (a *App) Close() {
+	if a.pgStore != nil {
+		a.pgStore.Close()
+	}
+}

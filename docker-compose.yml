@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: Apache-2.0
+# Local production-shaped stack: Postgres (pgvector) + Earshot API + worker.
+# Secrets are NOT baked in — provide a real LLM key/project PAT via files/secrets.
+name: earshot
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: earshot
+      POSTGRES_PASSWORD: earshot
+      POSTGRES_DB: earshot
+    ports:
+      - "5432:5432"
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U earshot -d earshot"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # One-shot: apply app schema + River tables, then exit.
+  migrate:
+    build: .
+    command: ["migrate"]
+    environment:
+      EARSHOT_DATABASE_URL: postgres://earshot:earshot@db:5432/earshot?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    command: ["serve"]
+    environment:
+      EARSHOT_HTTP_ADDR: ":8080"
+      EARSHOT_DATABASE_URL: postgres://earshot:earshot@db:5432/earshot?sslmode=disable
+      EARSHOT_QUEUE: river
+      EARSHOT_LLM_MODEL: fake:classifier-v1
+      EARSHOT_EMBED_MODEL: fake:hash-256
+    ports:
+      - "8080:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    build: .
+    command: ["worker"]
+    environment:
+      EARSHOT_DATABASE_URL: postgres://earshot:earshot@db:5432/earshot?sslmode=disable
+      EARSHOT_QUEUE: river
+      EARSHOT_LLM_MODEL: fake:classifier-v1
+      EARSHOT_EMBED_MODEL: fake:hash-256
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  dbdata:

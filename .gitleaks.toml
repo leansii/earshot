@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+title = "Earshot gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic fixtures in tests and redaction patterns are not real secrets"
+regexTarget = "match"
+paths = [
+  '''.*_test\.go$''',
+  '''internal/scrub/scrub\.go$''',
+]
+regexes = [
+  # AWS's own documented example access key id.
+  '''AKIAIOSFODNN7EXAMPLE''',
+]

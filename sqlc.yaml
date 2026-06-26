@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+# sqlc is wired but not yet generating: the v1 store uses hand-written pgx
+# queries. Run `sqlc generate` to produce type-safe accessors in
+# internal/store/pgxstore/db, then refactor pgxstore to use them behind the
+# unchanged store.Store interface. Tracked as a follow-up issue.
+version: "2"
+sql:
+  - engine: "postgresql"
+    schema: "internal/store/pgxstore/schema.sql"
+    queries: "internal/store/pgxstore/queries"
+    gen:
+      go:
+        package: "db"
+        out: "internal/store/pgxstore/db"
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+        emit_pointers_for_null_types: true
