@@ -6,7 +6,7 @@ By contributing you agree your work is licensed under the same terms.
 
 ## Prerequisites
 
-- **Go 1.23+**
+- **Go 1.25+**
 - Optional (production paths and codegen):
   - Docker / Docker Compose (Postgres + pgvector)
   - [`golangci-lint`](https://golangci-lint.run) v2

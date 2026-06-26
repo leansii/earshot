@@ -69,16 +69,26 @@ func (p *Pipeline) enrich(ctx context.Context, feedbackID string) error {
 		return fmt.Errorf("triage: load project: %w", err)
 	}
 
-	// 1. Enrich. Body is untrusted data; the model must not obey it.
+	// 1. Scrub FIRST. The model (and everything downstream) only ever sees
+	//    scrubbed text — principle #4, "no secrets in the model's context".
+	//    Scrubbing before the LLM also means no later truncation can split a
+	//    secret into a fragment that evades redaction.
+	scrubbedBody, report := scrub.Text(fb.Body)
+	if report.Total() > 0 {
+		p.log.Info("scrubbed secrets/PII", "feedback", feedbackID, "redactions", report.Total())
+	}
+
+	// 2. Enrich the scrubbed feedback. It is untrusted data; the model must not
+	//    obey instructions inside it.
 	res, err := p.provider.Enrich(ctx, llm.EnrichInput{
-		Body: fb.Body, Route: fb.Route, Severity: fb.Severity, Context: fb.Context,
+		Body: scrubbedBody, Route: fb.Route, Severity: fb.Severity, Context: fb.Context,
 	})
 	if err != nil {
 		return fmt.Errorf("triage: enrich %s: %w", feedbackID, err)
 	}
 
-	// 2. Dedup against existing feedback-issues in the project.
-	vec, err := p.embedder.Embed(ctx, fb.Body)
+	// 3. Dedup against existing feedback-issues in the project.
+	vec, err := p.embedder.Embed(ctx, scrubbedBody)
 	if err != nil {
 		return fmt.Errorf("triage: embed %s: %w", feedbackID, err)
 	}
@@ -91,13 +101,9 @@ func (p *Pipeline) enrich(ctx context.Context, feedbackID string) error {
 		return p.store.LinkFeedback(ctx, feedbackID, match.Item.ID)
 	}
 
-	// 3. Scrub everything that could reach a (possibly public) issue.
-	scrubbedBody, report := scrub.Text(fb.Body)
+	// Defensively re-scrub the model's output (idempotent) before it is stored.
 	title, _ := scrub.Text(res.Title)
 	summary, _ := scrub.Text(res.Summary)
-	if report.Total() > 0 {
-		p.log.Info("scrubbed secrets/PII", "feedback", feedbackID, "redactions", report.Total())
-	}
 
 	// 4. Create the feedback-issue (source of truth in our DB).
 	item, err := p.store.CreateItem(ctx, core.Item{

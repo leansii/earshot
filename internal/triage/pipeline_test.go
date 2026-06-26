@@ -193,6 +193,24 @@ func TestPipeline_ScrubsBeforeFiling(t *testing.T) {
 	}
 }
 
+// TestPipeline_TitleNeverLeaksTruncatedSecret is a regression test: a secret
+// near the start of a long body must not survive in the (truncated) title.
+// Scrubbing before enrichment guarantees there is no secret left to truncate.
+func TestPipeline_TitleNeverLeaksTruncatedSecret(t *testing.T) {
+	h := newHarness(t, nil)
+	fb := h.addFeedback(t, "ghp_abcdefghijklmnopqrstuvwxyz0123456789AB is my token and the save "+
+		"button crashes badly when clicked repeatedly on the settings page over and over")
+	h.run(t, fb.ID)
+
+	it := h.items(t)[0]
+	if strings.Contains(it.Title, "ghp_") {
+		t.Fatalf("title leaked a (possibly truncated) token: %q", it.Title)
+	}
+	if strings.Contains(h.tracker.Issues[0].Title, "ghp_") {
+		t.Fatalf("filed issue title leaked a token: %q", h.tracker.Issues[0].Title)
+	}
+}
+
 // TestApproveTask_SubIssuePushesViaProjectToken is the human-gate guarantee at
 // the task level: only an explicit approval pushes a task, as a sub-issue, using
 // the project's own token.

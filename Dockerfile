@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # ---- build stage ----
-FROM golang:1.23-alpine AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src
 
 # Cache modules first.
