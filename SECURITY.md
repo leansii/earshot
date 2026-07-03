@@ -10,7 +10,7 @@ GitHub repositories. We take its security posture seriously and welcome reports.
 
 - Preferred: use **GitHub Private Vulnerability Reporting** for this repository
   (Security ▸ *Report a vulnerability*). This opens a private advisory thread.
-- Alternatively, email **security@leansii.dev** with the details below. If you
+- Alternatively, email **security@leansii.com** with the details below. If you
   need encryption, request our PGP key in your first message.
 
 Please include:
