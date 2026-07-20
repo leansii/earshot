@@ -13,6 +13,7 @@ package riverq
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -82,6 +83,7 @@ func (w *enrichWorker) Work(ctx context.Context, j *river.Job[EnrichArgs]) error
 // Consumer runs River workers that dispatch to a queue.Handler.
 type Consumer struct {
 	client *river.Client[pgx.Tx]
+	pool   *pgxpool.Pool
 }
 
 // NewConsumer builds a River client that consumes enrich jobs via h.
@@ -101,7 +103,7 @@ func NewConsumer(pool *pgxpool.Pool, h queue.Handler, maxWorkers int) (*Consumer
 	if err != nil {
 		return nil, fmt.Errorf("riverq: new consumer: %w", err)
 	}
-	return &Consumer{client: client}, nil
+	return &Consumer{client: client, pool: pool}, nil
 }
 
 // Run starts River and blocks until ctx is cancelled.
@@ -110,5 +112,53 @@ func (c *Consumer) Run(ctx context.Context) error {
 		return fmt.Errorf("riverq: start: %w", err)
 	}
 	<-ctx.Done()
+	return c.client.Stop(context.Background())
+}
+
+// runnableJobsSQL reports whether any job is runnable right now: waiting to
+// be picked up, currently executing, or due for a retry. Retries scheduled in
+// the future do not count — drain leaves them for the next run.
+const runnableJobsSQL = `
+SELECT EXISTS (
+    SELECT 1 FROM river_job
+    WHERE state IN ('available', 'running')
+       OR (state IN ('retryable', 'scheduled') AND scheduled_at <= now())
+)`
+
+// RunDrain starts River, works jobs until none are runnable, then stops and
+// returns. This is the scheduled-drain entry point: a cron-launched process
+// empties the queue and exits, so the deployment (and a serverless database)
+// can scale to zero between runs. In-flight jobs are finished before Stop
+// returns; jobs whose retry lands in the future are left for the next drain.
+func (c *Consumer) RunDrain(ctx context.Context, poll time.Duration) error {
+	if poll <= 0 {
+		poll = 2 * time.Second
+	}
+	if err := c.client.Start(ctx); err != nil {
+		return fmt.Errorf("riverq: start: %w", err)
+	}
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+
+	// Require two consecutive empty polls as a margin against transient gaps
+	// between River's state transitions (fetch, completion flush).
+	empty := 0
+	for empty < 2 {
+		select {
+		case <-ctx.Done():
+			return c.client.Stop(context.Background())
+		case <-ticker.C:
+		}
+		var busy bool
+		if err := c.pool.QueryRow(ctx, runnableJobsSQL).Scan(&busy); err != nil {
+			_ = c.client.Stop(context.Background())
+			return fmt.Errorf("riverq: drain poll: %w", err)
+		}
+		if busy {
+			empty = 0
+		} else {
+			empty++
+		}
+	}
 	return c.client.Stop(context.Background())
 }

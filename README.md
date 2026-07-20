@@ -51,7 +51,7 @@ Each boundary is an interface, so backends swap without touching callers:
 |-----------|---------------------|--------------------------|-------------------------|
 | Queue     | `queue.Queue`       | River (Postgres) / memory| Redis (asynq), SQS, …   |
 | Store     | `store.Store`       | Postgres (pgx) / memory  | any SQL store           |
-| LLM agent | `llm.Provider`      | `anthropic:…` / `fake:…` | any `provider:model`    |
+| LLM agent | `llm.Provider`      | `anthropic:…` / `deepseek:…` / `gemini:…` / `fake:…` | any `provider:model` |
 | Embeddings| `embed.Embedder`    | `fake:…`                 | Voyage, OpenAI, local   |
 | Tracker   | `connector.Tracker` | GitHub / mock            | Jira, Linear, GHES, …   |
 

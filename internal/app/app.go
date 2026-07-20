@@ -6,8 +6,10 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/leansii/earshot/internal/config"
 	"github.com/leansii/earshot/internal/connector"
@@ -93,6 +95,20 @@ func (a *App) RunWorker(ctx context.Context) error {
 		return err
 	}
 	return consumer.Run(ctx)
+}
+
+// DrainWorker consumes queued jobs until none are runnable, then returns.
+// This is the scheduled-drain mode (cron-launched process empties the queue
+// and exits). River only — the memory queue lives inside `serve`.
+func (a *App) DrainWorker(ctx context.Context) error {
+	if a.memBackend != nil {
+		return errors.New("app: drain requires the river queue; the memory queue is in-process only")
+	}
+	consumer, err := riverq.NewConsumer(a.pgStore.Pool(), a.Pipeline.Handle, 10)
+	if err != nil {
+		return err
+	}
+	return consumer.RunDrain(ctx, 2*time.Second)
 }
 
 // Close releases resources.

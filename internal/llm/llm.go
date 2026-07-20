@@ -2,6 +2,7 @@
 
 // Package llm is a provider-agnostic interface for classifying feedback.
 // Models are addressed as "provider:model" (e.g. "anthropic:claude-haiku-4-5",
+// "deepseek:deepseek-v4-flash", "gemini:gemini-2.5-flash-lite",
 // "fake:classifier-v1"), mirroring the design Earshot inherits from Vouch.
 //
 // Security note: feedback bodies are untrusted and a prompt-injection vector.
@@ -55,15 +56,30 @@ func New(address string, keys KeyFunc) (Provider, error) {
 	case "fake":
 		return NewFake(model), nil
 	case "anthropic":
-		if keys == nil {
-			return nil, fmt.Errorf("llm: provider %q requires a key source", provider)
-		}
-		key, err := keys(provider)
+		key, err := resolveKey(provider, keys)
 		if err != nil {
-			return nil, fmt.Errorf("llm: resolving key for %q: %w", provider, err)
+			return nil, err
 		}
 		return NewAnthropic(model, key), nil
+	case "deepseek", "gemini":
+		key, err := resolveKey(provider, keys)
+		if err != nil {
+			return nil, err
+		}
+		return NewOpenAICompat(provider, model, key)
 	default:
 		return nil, fmt.Errorf("llm: unknown provider %q", provider)
 	}
+}
+
+// resolveKey fetches a provider's API key from the key source.
+func resolveKey(provider string, keys KeyFunc) (string, error) {
+	if keys == nil {
+		return "", fmt.Errorf("llm: provider %q requires a key source", provider)
+	}
+	key, err := keys(provider)
+	if err != nil {
+		return "", fmt.Errorf("llm: resolving key for %q: %w", provider, err)
+	}
+	return key, nil
 }

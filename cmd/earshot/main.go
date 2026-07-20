@@ -51,7 +51,7 @@ func main() {
 	case "serve":
 		err = cmdServe(ctx, log)
 	case "worker":
-		err = cmdWorker(ctx, log)
+		err = cmdWorker(ctx, log, os.Args[2:])
 	case "migrate":
 		err = cmdMigrate(ctx, log, os.Args[2:])
 	case "seed-project":
@@ -85,7 +85,7 @@ func usage() {
 
 Usage:
   earshot serve          Run the HTTP ingest+triage API (and worker, in memory mode)
-  earshot worker         Run a job worker (River backend)
+  earshot worker         Run a job worker (River backend; --drain empties the queue and exits)
   earshot migrate        Apply database migrations (app schema + River)
   earshot seed-project   Create a project and print a new app API key
   earshot triage-list    List feedback-issues for a project
@@ -144,7 +144,11 @@ func cmdServe(ctx context.Context, log *slog.Logger) error {
 	return nil
 }
 
-func cmdWorker(ctx context.Context, log *slog.Logger) error {
+func cmdWorker(ctx context.Context, log *slog.Logger, args []string) error {
+	fs := flag.NewFlagSet("worker", flag.ExitOnError)
+	drain := fs.Bool("drain", false, "process runnable jobs until the queue is empty, then exit")
+	_ = fs.Parse(args)
+
 	a, err := loadApp(ctx, log)
 	if err != nil {
 		return err
@@ -153,6 +157,16 @@ func cmdWorker(ctx context.Context, log *slog.Logger) error {
 	if a.InMemory() {
 		return errors.New("worker: memory queue is in-process only; use `serve` or set EARSHOT_QUEUE=river")
 	}
+
+	if *drain {
+		log.Info("worker draining queue", "queue", a.Cfg.Queue)
+		if err := a.DrainWorker(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			return err
+		}
+		log.Info("queue drained")
+		return nil
+	}
+
 	log.Info("worker started", "queue", a.Cfg.Queue)
 	if err := a.RunWorker(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		return err

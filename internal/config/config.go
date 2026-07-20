@@ -22,20 +22,34 @@ type Config struct {
 	LLMModel   string
 	EmbedModel string
 
-	// anthropicKeyFile is the path to the Anthropic API key, if using that
-	// provider. The key itself is read lazily via KeyFunc.
-	anthropicKeyFile string
+	// keyFiles maps an LLM provider name to the path of its API key file, if
+	// configured. Keys themselves are read lazily via KeyFunc.
+	keyFiles map[string]string
+}
+
+// llmKeyEnv maps each keyed LLM provider to its environment variable names:
+// EARSHOT_<X>_API_KEY_FILE (preferred, a path) and EARSHOT_<X>_API_KEY
+// (direct fallback).
+var llmKeyEnv = map[string]string{
+	"anthropic": "EARSHOT_ANTHROPIC_API_KEY",
+	"deepseek":  "EARSHOT_DEEPSEEK_API_KEY",
+	"gemini":    "EARSHOT_GEMINI_API_KEY",
 }
 
 // Load reads configuration from the environment, applying safe defaults.
 func Load() (Config, error) {
 	c := Config{
-		HTTPAddr:         env("EARSHOT_HTTP_ADDR", ":8080"),
-		DatabaseURL:      env("EARSHOT_DATABASE_URL", ""),
-		Queue:            env("EARSHOT_QUEUE", "memory"),
-		LLMModel:         env("EARSHOT_LLM_MODEL", "fake:classifier-v1"),
-		EmbedModel:       env("EARSHOT_EMBED_MODEL", "fake:hash-256"),
-		anthropicKeyFile: env("EARSHOT_ANTHROPIC_API_KEY_FILE", ""),
+		HTTPAddr:    env("EARSHOT_HTTP_ADDR", ":8080"),
+		DatabaseURL: env("EARSHOT_DATABASE_URL", ""),
+		Queue:       env("EARSHOT_QUEUE", "memory"),
+		LLMModel:    env("EARSHOT_LLM_MODEL", "fake:classifier-v1"),
+		EmbedModel:  env("EARSHOT_EMBED_MODEL", "fake:hash-256"),
+		keyFiles:    map[string]string{},
+	}
+	for provider, envVar := range llmKeyEnv {
+		if f := env(envVar+"_FILE", ""); f != "" {
+			c.keyFiles[provider] = f
+		}
 	}
 	switch c.Queue {
 	case "memory", "river":
@@ -52,19 +66,18 @@ func Load() (Config, error) {
 // time. Only providers that need keys are handled; "fake" needs none.
 func (c Config) KeyFunc() llm.KeyFunc {
 	return func(provider string) (string, error) {
-		switch provider {
-		case "anthropic":
-			if c.anthropicKeyFile == "" {
-				// Fall back to a direct env var if no file is configured.
-				if k := os.Getenv("EARSHOT_ANTHROPIC_API_KEY"); k != "" {
-					return k, nil
-				}
-				return "", fmt.Errorf("config: set EARSHOT_ANTHROPIC_API_KEY_FILE")
-			}
-			return readSecretFile(c.anthropicKeyFile)
-		default:
+		envVar, ok := llmKeyEnv[provider]
+		if !ok {
 			return "", fmt.Errorf("config: no key source for provider %q", provider)
 		}
+		if f := c.keyFiles[provider]; f != "" {
+			return readSecretFile(f)
+		}
+		// Fall back to a direct env var if no file is configured.
+		if k := os.Getenv(envVar); k != "" {
+			return k, nil
+		}
+		return "", fmt.Errorf("config: set %s_FILE", envVar)
 	}
 }
 
